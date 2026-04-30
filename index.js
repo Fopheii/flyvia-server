@@ -203,17 +203,8 @@ async function fetchAllOpenSky() {
   return stateMap;
 }
 
-// ── Merge & cache ─────────────────────────────────────────────────────────────
-async function fetchAndMerge() {
-  console.log('\n[Cycle] Starting at', new Date().toISOString());
-
-  // Step 1 — AeroDataBox (routes + airline names)
-  const flightMap = await fetchAllAeroDataBox();
-
-  // Step 2 — OpenSky (real GPS)
-  const stateMap = await fetchAllOpenSky();
-
-  // Step 3 — Merge
+// ── Build flight list from AeroDataBox map ────────────────────────────────────
+function buildFlightsFromAdb(flightMap, stateMap = new Map()) {
   const flights = [];
   let gpsMatches = 0, estimated = 0;
 
@@ -223,7 +214,7 @@ async function fetchAndMerge() {
     let lat, lon, altitude, speed, heading;
 
     if (state) {
-      if (state[8]) continue;                              // on_ground — skip
+      if (state[8]) continue;                                    // on_ground — skip
       lat      = state[6];
       lon      = state[5];
       altitude = state[7] ? Math.round(state[7] * 3.28084) : 0; // m → ft
@@ -257,16 +248,38 @@ async function fetchAndMerge() {
     });
   }
 
-  console.log(
-    `[Cycle] ${flights.length} flights — ${gpsMatches} GPS matched, ${estimated} estimated`
-  );
+  console.log(`[Build] ${flights.length} flights — ${gpsMatches} GPS matched, ${estimated} estimated`);
+  return flights;
+}
 
-  if (flights.length > 0) {
-    cachedFlights = flights;
+// ── Merge & cache ─────────────────────────────────────────────────────────────
+async function fetchAndMerge() {
+  console.log('\n[Cycle] Starting at', new Date().toISOString());
+
+  // Step 1 — AeroDataBox (routes + airline names)
+  const flightMap = await fetchAllAeroDataBox();
+
+  // Cache immediately after AeroDataBox — don't wait for OpenSky
+  const adbFlights = buildFlightsFromAdb(flightMap);
+  if (adbFlights.length > 0) {
+    cachedFlights = adbFlights;
     lastUpdated   = new Date().toISOString();
-    console.log(`[${lastUpdated}] Cache updated`);
+    console.log(`[ADB] Cached ${cachedFlights.length} flights immediately`);
   } else {
-    console.log('[Cycle] Empty result — keeping existing cache of', cachedFlights.length);
+    console.log('[ADB] No flights built — keeping existing cache of', cachedFlights.length);
+  }
+
+  // Step 2 — OpenSky (optional GPS enrichment — if it fails, ADB cache stays)
+  try {
+    const stateMap = await fetchAllOpenSky();
+    const enriched = buildFlightsFromAdb(flightMap, stateMap);
+    if (enriched.length > 0) {
+      cachedFlights = enriched;
+      lastUpdated   = new Date().toISOString();
+      console.log(`[OpenSky] Cache enriched → ${cachedFlights.length} flights with GPS`);
+    }
+  } catch (e) {
+    console.log('[OpenSky] Failed — keeping AeroDataBox cache:', e.message);
   }
 }
 
