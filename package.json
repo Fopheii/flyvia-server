@@ -1,0 +1,19 @@
+{
+  "name": "flyvia-server",
+  "version": "1.0.0",
+  "description": "Flyvia flight tracking backend — fetches live flight data from OpenSky Network",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "node-cron": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
