@@ -1,6 +1,13 @@
 const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
+const fetch = require('node-fetch');
+const https = require('https');
+
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: false,
+  keepAlive: true,
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -55,7 +62,8 @@ async function fetchZone(query) {
 
   const response = await fetch(url, {
     headers,
-    signal: AbortSignal.timeout(15000),
+    agent: httpsAgent,
+    timeout: 15000,
   });
 
   console.log('OpenSky response status:', response.status, 'for zone', query);
