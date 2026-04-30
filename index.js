@@ -38,20 +38,35 @@ function mapState(state) {
 
 async function fetchZone(query) {
   const url = `${OPENSKY_BASE}?${query}`;
+  console.log('Fetching OpenSky zone:', url);
   const res = await fetch(url, {
     headers: { 'User-Agent': 'flyvia-server/1.0' },
     signal: AbortSignal.timeout(15000),
   });
-  if (!res.ok) throw new Error(`OpenSky responded ${res.status} for zone ${query}`);
+  console.log('OpenSky response status:', res.status, 'for zone', query);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`OpenSky ${res.status} for zone ${query}: ${body.slice(0, 200)}`);
+  }
   const data = await res.json();
+  console.log('OpenSky states count:', data?.states?.length ?? 0, 'for zone', query);
   return data.states || [];
 }
 
 async function fetchAllFlights() {
+  console.log('Cron job triggered at:', new Date().toISOString());
   try {
     const results = await Promise.allSettled(ZONES.map(fetchZone));
 
+    // Log any zone-level failures
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        console.error(`Zone ${i} failed:`, r.reason?.message || r.reason);
+      }
+    });
+
     const states = results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
+    console.log('Total raw states across all zones:', states.length);
 
     const flights = states
       .map(mapState)
