@@ -75,7 +75,7 @@ async function fetchAllFlights() {
 
     // 10 s gap between zone requests to avoid rate limiting
     if (i < ZONES.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 10000));
+      await new Promise(resolve => setTimeout(resolve, 15000));
     }
   }
 
@@ -96,8 +96,8 @@ async function fetchAllFlights() {
   }
 }
 
-// Every 5 minutes — well within OpenSky's anonymous rate limit
-cron.schedule('*/5 * * * *', fetchAllFlights);
+// Every 10 minutes — well within OpenSky's anonymous rate limit
+cron.schedule('*/10 * * * *', fetchAllFlights);
 fetchAllFlights();
 
 app.use((req, res, next) => {
