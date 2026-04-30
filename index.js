@@ -58,19 +58,26 @@ function mapFlight(state) {
 
 async function fetchAllFlights() {
   console.log('Cron job triggered at:', new Date().toISOString());
-  const results = await Promise.allSettled(
-    ZONES.map((zone, i) =>
-      fetchZone(`https://opensky-network.org/api/states/all?${zone}`)
-        .catch(err => { console.log(`Zone ${i} failed:`, err.message); return null; })
-    )
-  );
 
   let allStates = [];
-  results.forEach((result, i) => {
-    if (result.status === 'fulfilled' && result.value?.states) {
-      allStates = allStates.concat(result.value.states);
+
+  for (let i = 0; i < ZONES.length; i++) {
+    const url = `https://opensky-network.org/api/states/all?${ZONES[i]}`;
+    try {
+      const data = await fetchZone(url);
+      if (data?.states) {
+        allStates = allStates.concat(data.states);
+        console.log(`Zone ${i} OK: ${data.states.length} states`);
+      }
+    } catch (e) {
+      console.log(`Zone ${i} failed:`, e.message);
     }
-  });
+
+    // 10 s gap between zone requests to avoid rate limiting
+    if (i < ZONES.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 10000));
+    }
+  }
 
   console.log('Total raw states across all zones:', allStates.length);
 
@@ -79,12 +86,18 @@ async function fetchAllFlights() {
     .map(mapFlight)
     .filter(f => f.id);
 
-  cachedFlights = flights;
-  lastUpdated = new Date().toISOString();
-  console.log(`[${lastUpdated}] Cached ${flights.length} flights`);
+  // Only replace cache when we actually got data — never wipe on a bad run
+  if (flights.length > 0) {
+    cachedFlights = flights;
+    lastUpdated = new Date().toISOString();
+    console.log(`[${lastUpdated}] Cached ${flights.length} flights`);
+  } else {
+    console.log('No new flights — keeping existing cache of', cachedFlights.length);
+  }
 }
 
-cron.schedule('*/30 * * * * *', fetchAllFlights);
+// Every 5 minutes — well within OpenSky's anonymous rate limit
+cron.schedule('*/5 * * * *', fetchAllFlights);
 fetchAllFlights();
 
 app.use((req, res, next) => {
@@ -103,10 +116,13 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/flights', (req, res) => {
+  const limit   = req.query.limit ? parseInt(req.query.limit, 10) : null;
+  const flights = (limit && limit > 0) ? cachedFlights.slice(0, limit) : cachedFlights;
   res.json({
-    count: cachedFlights.length,
+    count:        flights.length,
+    total:        cachedFlights.length,
     last_updated: lastUpdated,
-    flights: cachedFlights
+    flights,
   });
 });
 
