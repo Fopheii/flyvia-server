@@ -38,17 +38,33 @@ function mapState(state) {
 
 async function fetchZone(query) {
   const url = `${OPENSKY_BASE}?${query}`;
-  console.log('Fetching OpenSky zone:', url);
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'flyvia-server/1.0' },
+  const username = process.env.OPENSKY_USERNAME;
+  const password = process.env.OPENSKY_PASSWORD;
+
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+
+  if (username && password) {
+    const credentials = Buffer.from(`${username}:${password}`).toString('base64');
+    headers['Authorization'] = `Basic ${credentials}`;
+    console.log('Fetching OpenSky zone (authenticated):', url);
+  } else {
+    console.log('Fetching OpenSky zone (anonymous):', url);
+  }
+
+  const response = await fetch(url, {
+    headers,
     signal: AbortSignal.timeout(15000),
   });
-  console.log('OpenSky response status:', res.status, 'for zone', query);
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`OpenSky ${res.status} for zone ${query}: ${body.slice(0, 200)}`);
+
+  console.log('OpenSky response status:', response.status, 'for zone', query);
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
   }
-  const data = await res.json();
+
+  const data = await response.json();
   console.log('OpenSky states count:', data?.states?.length ?? 0, 'for zone', query);
   return data.states || [];
 }
