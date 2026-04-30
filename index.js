@@ -19,11 +19,12 @@ const AIRPORTS = [
   'MDSD', 'MDPC', 'MDST',
   'TJSJ',
   'MMMX', 'MMUN',
-  'SKBO',
-  'SBGR',
-  'CYYZ',
-  'LEMD',
-  'EGLL',
+  'SKBO', 'SKCL',
+  'SBGR', 'SBGL',
+  'CYYZ', 'CYUL',
+  'MPTO',
+  'LEMD', 'LEBL',
+  'EGLL', 'EGCC',
 ];
 
 const OPENSKY_ZONES = [
@@ -33,24 +34,44 @@ const OPENSKY_ZONES = [
   'lamin=-60&lamax=90&lomin=60&lomax=180',
 ];
 
-// Airport coords for estimated positioning on unmatched flights
+// ICAO → IATA for all hub airports
+const ICAO_TO_IATA = {
+  KJFK: 'JFK', KMIA: 'MIA', KLAX: 'LAX', KATL: 'ATL', KORD: 'ORD',
+  MDSD: 'SDQ', MDPC: 'PUJ', MDST: 'STI',
+  TJSJ: 'SJU',
+  MMMX: 'MEX', MMUN: 'CUN',
+  SKBO: 'BOG', SKCL: 'CLO',
+  SBGR: 'GRU', SBGL: 'GIG',
+  CYYZ: 'YYZ', CYUL: 'YUL',
+  MPTO: 'PTY',
+  LEMD: 'MAD', LEBL: 'BCN',
+  EGLL: 'LHR', EGCC: 'MAN',
+};
+
+// Airport coords keyed by IATA — used by resolvePosition
 const AIRPORT_COORDS = {
-  KJFK: { lat: 40.6413,  lon: -73.7781  },
-  KMIA: { lat: 25.7959,  lon: -80.2870  },
-  KLAX: { lat: 33.9425,  lon: -118.4081 },
-  KATL: { lat: 33.6407,  lon: -84.4277  },
-  KORD: { lat: 41.9742,  lon: -87.9073  },
-  MDSD: { lat: 18.4297,  lon: -69.6689  },
-  MDPC: { lat: 18.5674,  lon: -68.3634  },
-  MDST: { lat: 19.4061,  lon: -70.6047  },
-  TJSJ: { lat: 18.4394,  lon: -66.0018  },
-  MMMX: { lat: 19.4363,  lon: -99.0721  },
-  MMUN: { lat: 21.0365,  lon: -86.8771  },
-  SKBO: { lat:  4.7016,  lon: -74.1469  },
-  SBGR: { lat: -23.4356, lon: -46.4731  },
-  CYYZ: { lat: 43.6777,  lon: -79.6248  },
-  LEMD: { lat: 40.4936,  lon:  -3.5668  },
-  EGLL: { lat: 51.4775,  lon:  -0.4614  },
+  JFK: { lat: 40.6413,  lon: -73.7781  },
+  MIA: { lat: 25.7959,  lon: -80.2870  },
+  LAX: { lat: 33.9425,  lon: -118.4081 },
+  ATL: { lat: 33.6407,  lon: -84.4277  },
+  ORD: { lat: 41.9742,  lon: -87.9073  },
+  SDQ: { lat: 18.4297,  lon: -69.6689  },
+  PUJ: { lat: 18.5674,  lon: -68.3634  },
+  STI: { lat: 19.4061,  lon: -70.6047  },
+  SJU: { lat: 18.4394,  lon: -66.0018  },
+  MEX: { lat: 19.4363,  lon: -99.0721  },
+  CUN: { lat: 21.0365,  lon: -86.8771  },
+  BOG: { lat:  4.7016,  lon: -74.1469  },
+  CLO: { lat:  3.5432,  lon: -76.3816  },
+  GRU: { lat: -23.4356, lon: -46.4731  },
+  GIG: { lat: -22.8100, lon: -43.2506  },
+  YYZ: { lat: 43.6777,  lon: -79.6248  },
+  YUL: { lat: 45.4706,  lon: -73.7408  },
+  PTY: { lat:  9.0714,  lon: -79.3835  },
+  MAD: { lat: 40.4936,  lon:  -3.5668  },
+  BCN: { lat: 41.2971,  lon:   2.0785  },
+  LHR: { lat: 51.4775,  lon:  -0.4614  },
+  MAN: { lat: 53.3537,  lon:  -2.2750  },
 };
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -60,13 +81,6 @@ let lastUpdated   = null;
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-function toMs(timeObj) {
-  if (!timeObj) return null;
-  const raw = timeObj.utc ?? timeObj.local;
-  if (!raw) return null;
-  const ms = new Date(raw).getTime();
-  return isNaN(ms) ? null : ms;
-}
 
 function bearing(dep, arr) {
   const dLon = (arr.lon - dep.lon) * Math.PI / 180;
@@ -78,103 +92,105 @@ function bearing(dep, arr) {
 }
 
 
-// ── ICAO → IATA lookup for hub airports ──────────────────────────────────────
-const ICAO_TO_IATA = {
-  KJFK: 'JFK', KMIA: 'MIA', KLAX: 'LAX', KATL: 'ATL', KORD: 'ORD',
-  MDSD: 'SDQ', MDPC: 'PUJ', MDST: 'STI',
-  TJSJ: 'SJU',
-  MMMX: 'MEX', MMUN: 'CUN',
-  SKBO: 'BOG',
-  SBGR: 'GRU',
-  CYYZ: 'YYZ',
-  LEMD: 'MAD',
-  EGLL: 'LHR',
-};
-
 // ── AeroDataBox ───────────────────────────────────────────────────────────────
-async function fetchAirportMovements(icao) {
-  if (!AERODATABOX_KEY) throw new Error('AERODATABOX_KEY not set');
+async function fetchAirport(icao) {
+  const iata = ICAO_TO_IATA[icao] || icao.slice(1);
 
-  // Departures: up to 6 h ago (long-haul still in the air)
-  // Arrivals:   up to 6 h ahead (flights en route, arriving later today)
-  const from = new Date(Date.now() - 6 * 60 * 60 * 1000);
-  const to   = new Date(Date.now() + 6 * 60 * 60 * 1000);
-  const fmt  = d => d.toISOString().slice(0, 16);
+  const now  = new Date();
+  const from = now.toISOString().slice(0, 16);
+  const to   = new Date(now.getTime() + 6 * 60 * 60 * 1000).toISOString().slice(0, 16);
 
-  const url =
-    `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}` +
-    `/${fmt(from)}/${fmt(to)}` +
-    `?withLeg=true&withCancelled=false&withCodeshared=false` +
-    `&withCargo=false&withPrivate=false&withLocation=false&direction=Both`;
-
+  const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}/${from}/${to}`;
   const res = await fetch(url, {
     headers: {
-      'X-RapidAPI-Key':  AERODATABOX_KEY,
-      'X-RapidAPI-Host': 'aerodatabox.p.rapidapi.com',
+      'x-rapidapi-host': 'aerodatabox.p.rapidapi.com',
+      'x-rapidapi-key':  AERODATABOX_KEY,
     },
     timeout: 15000,
   });
 
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
+  const data = await res.json();
 
-function isInFlight(f) {
-  const status = f.status ?? '';
-  if (['Cancelled', 'Diverted', 'Landed'].includes(status)) return false;
-  const depMs = toMs(f.departure?.actualTime) ?? toMs(f.departure?.scheduledTime);
-  const arrMs = toMs(f.arrival?.actualTime)   ?? toMs(f.arrival?.scheduledTime);
-  const now   = Date.now();
-  if (depMs && depMs > now) return false;                     // not yet departed
-  if (arrMs && arrMs < now - 30 * 60 * 1000) return false;   // landed >30 min ago
-  return true;
-}
+  const flights = [];
 
-function addToMap(flightMap, f, fromIata, toIata) {
-  const callsign = f.callSign?.trim();
-  if (!callsign || !fromIata || !toIata) return;
-  if (!isInFlight(f)) return;
+  // DEPARTURES: this airport is the origin
+  for (const f of data.departures || []) {
+    if (!f.number || !f.arrival?.airport?.iata) continue;
+    flights.push({
+      id:           f.number.replace(' ', ''),
+      callsign:     f.callSign?.trim() || f.number.replace(' ', ''),
+      flightNumber: f.number,
+      airline:      f.airline?.name || 'Unknown',
+      from:         iata,
+      to:           f.arrival.airport.iata,
+      fromCity:     f.departure?.airport?.name || iata,
+      toCity:       f.arrival.airport.name     || f.arrival.airport.iata,
+      status:       f.status || 'Scheduled',
+      departure:    f.departure?.scheduledTime?.utc || null,
+      arrival:      f.arrival?.scheduledTime?.utc   || null,
+    });
+  }
 
-  const depMs = toMs(f.departure?.actualTime) ?? toMs(f.departure?.scheduledTime);
-  const arrMs = toMs(f.arrival?.actualTime)   ?? toMs(f.arrival?.scheduledTime);
+  // ARRIVALS: this airport is the destination
+  for (const f of data.arrivals || []) {
+    if (!f.number || !f.departure?.airport?.iata) continue;
+    flights.push({
+      id:           f.number.replace(' ', '') + '_arr',
+      callsign:     f.callSign?.trim() || f.number.replace(' ', ''),
+      flightNumber: f.number,
+      airline:      f.airline?.name || 'Unknown',
+      from:         f.departure.airport.iata,
+      to:           iata,
+      fromCity:     f.departure.airport.name || f.departure.airport.iata,
+      toCity:       f.arrival?.airport?.name || iata,
+      status:       f.status || 'Scheduled',
+      departure:    f.departure?.scheduledTime?.utc || null,
+      arrival:      f.arrival?.scheduledTime?.utc   || null,
+    });
+  }
 
-  flightMap.set(callsign, {
-    callsign,
-    airline: f.airline?.name ?? null,
-    from:    fromIata,
-    to:      toIata,
-    depIcao: f.departure?.airport?.icao ?? null,
-    arrIcao: f.arrival?.airport?.icao   ?? null,
-    depMs,
-    arrMs,
-  });
+  return flights;
 }
 
 async function fetchAllAeroDataBox() {
   console.log(`\n[ADB] Fetching ${AIRPORTS.length} airports (departures + arrivals)`);
-  const flightMap = new Map();
+  const flightMap = new Map(); // callsign → flight metadata
 
   for (let i = 0; i < AIRPORTS.length; i++) {
-    const icao     = AIRPORTS[i];
-    const thisIata = ICAO_TO_IATA[icao] ?? icao; // authoritative IATA for this hub
+    const icao = AIRPORTS[i];
     try {
-      const data       = await fetchAirportMovements(icao);
-      const departures = data.departures ?? [];
-      const arrivals   = data.arrivals   ?? [];
+      const flights = await fetchAirport(icao);
 
-      // Departures: this airport is the origin (from = thisIata)
-      for (const f of departures) {
-        const toIata = f.arrival?.airport?.iata ?? f.arrival?.airport?.icao ?? null;
-        addToMap(flightMap, f, thisIata, toIata);
+      let added = 0;
+      for (const f of flights) {
+        if (!f.from || !f.to) continue;
+
+        // Skip flights clearly not in the air
+        const status = (f.status || '').toLowerCase();
+        if (['cancelled', 'diverted', 'landed'].includes(status)) continue;
+
+        const depMs = f.departure ? new Date(f.departure).getTime() : null;
+        const arrMs = f.arrival   ? new Date(f.arrival).getTime()   : null;
+        const now   = Date.now();
+
+        if (depMs && depMs > now) continue;                    // not yet departed
+        if (arrMs && arrMs < now - 30 * 60 * 1000) continue;  // landed >30 min ago
+
+        flightMap.set(f.callsign, {
+          callsign: f.callsign,
+          airline:  f.airline,
+          from:     f.from,
+          to:       f.to,
+          fromCity: f.fromCity,
+          toCity:   f.toCity,
+          depMs,
+          arrMs,
+        });
+        added++;
       }
 
-      // Arrivals: this airport is the destination (to = thisIata)
-      for (const f of arrivals) {
-        const fromIata = f.departure?.airport?.iata ?? f.departure?.airport?.icao ?? null;
-        addToMap(flightMap, f, fromIata, thisIata);
-      }
-
-      console.log(`[ADB] ${icao} (${thisIata}): ${departures.length} dep + ${arrivals.length} arr | map: ${flightMap.size}`);
+      console.log(`[ADB] ${icao}: ${flights.length} movements → ${added} in-flight | map: ${flightMap.size}`);
     } catch (e) {
       console.log(`[ADB] ${icao} failed:`, e.message);
     }
@@ -226,8 +242,8 @@ async function fetchAllOpenSky() {
 
 // ── Position from AeroDataBox data alone ─────────────────────────────────────
 function resolvePosition(flight) {
-  const dep = AIRPORT_COORDS[flight.depIcao];
-  const arr = AIRPORT_COORDS[flight.arrIcao];
+  const dep = AIRPORT_COORDS[flight.from];
+  const arr = AIRPORT_COORDS[flight.to];
 
   // Best case: interpolate between known airports using timing
   if (dep && arr && flight.depMs && flight.arrMs) {
