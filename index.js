@@ -78,6 +78,19 @@ function bearing(dep, arr) {
 }
 
 
+// ── ICAO → IATA lookup for hub airports ──────────────────────────────────────
+const ICAO_TO_IATA = {
+  KJFK: 'JFK', KMIA: 'MIA', KLAX: 'LAX', KATL: 'ATL', KORD: 'ORD',
+  MDSD: 'SDQ', MDPC: 'PUJ', MDST: 'STI',
+  TJSJ: 'SJU',
+  MMMX: 'MEX', MMUN: 'CUN',
+  SKBO: 'BOG',
+  SBGR: 'GRU',
+  CYYZ: 'YYZ',
+  LEMD: 'MAD',
+  EGLL: 'LHR',
+};
+
 // ── AeroDataBox ───────────────────────────────────────────────────────────────
 async function fetchAirportMovements(icao) {
   if (!AERODATABOX_KEY) throw new Error('AERODATABOX_KEY not set');
@@ -106,33 +119,30 @@ async function fetchAirportMovements(icao) {
   return res.json();
 }
 
-function addMovement(flightMap, f) {
-  const callsign = f.callSign?.trim();
-  if (!callsign) return;
-
+function isInFlight(f) {
   const status = f.status ?? '';
-  if (['Cancelled', 'Diverted', 'Landed'].includes(status)) return;
-
-  // departure time from origin airport
+  if (['Cancelled', 'Diverted', 'Landed'].includes(status)) return false;
   const depMs = toMs(f.departure?.actualTime) ?? toMs(f.departure?.scheduledTime);
-  // arrival time at destination airport
-  const arrMs = toMs(f.arrival?.actualTime) ?? toMs(f.arrival?.scheduledTime);
+  const arrMs = toMs(f.arrival?.actualTime)   ?? toMs(f.arrival?.scheduledTime);
+  const now   = Date.now();
+  if (depMs && depMs > now) return false;                     // not yet departed
+  if (arrMs && arrMs < now - 30 * 60 * 1000) return false;   // landed >30 min ago
+  return true;
+}
 
-  const now = Date.now();
+function addToMap(flightMap, f, fromIata, toIata) {
+  const callsign = f.callSign?.trim();
+  if (!callsign || !fromIata || !toIata) return;
+  if (!isInFlight(f)) return;
 
-  // Must have departed already (or departure time unknown)
-  if (depMs && depMs > now) return;
-  // Must not have already landed (or arrival time unknown)
-  if (arrMs && arrMs < now - 30 * 60 * 1000) return; // allow 30 min grace
+  const depMs = toMs(f.departure?.actualTime) ?? toMs(f.departure?.scheduledTime);
+  const arrMs = toMs(f.arrival?.actualTime)   ?? toMs(f.arrival?.scheduledTime);
 
-  // AeroDataBox sets departure/arrival correctly for both arrays:
-  //   departures[]: departure.airport = this airport, arrival.airport = destination
-  //   arrivals[]:   departure.airport = origin,       arrival.airport = this airport
   flightMap.set(callsign, {
     callsign,
-    airline: f.airline?.name                              ?? null,
-    from:    f.departure?.airport?.iata ?? f.departure?.airport?.icao ?? null,
-    to:      f.arrival?.airport?.iata   ?? f.arrival?.airport?.icao   ?? null,
+    airline: f.airline?.name ?? null,
+    from:    fromIata,
+    to:      toIata,
     depIcao: f.departure?.airport?.icao ?? null,
     arrIcao: f.arrival?.airport?.icao   ?? null,
     depMs,
@@ -142,26 +152,29 @@ function addMovement(flightMap, f) {
 
 async function fetchAllAeroDataBox() {
   console.log(`\n[ADB] Fetching ${AIRPORTS.length} airports (departures + arrivals)`);
-  const flightMap = new Map(); // callsign → flight metadata
+  const flightMap = new Map();
 
   for (let i = 0; i < AIRPORTS.length; i++) {
-    const icao = AIRPORTS[i];
+    const icao     = AIRPORTS[i];
+    const thisIata = ICAO_TO_IATA[icao] ?? icao; // authoritative IATA for this hub
     try {
       const data       = await fetchAirportMovements(icao);
       const departures = data.departures ?? [];
       const arrivals   = data.arrivals   ?? [];
 
-      for (const f of departures) addMovement(flightMap, f);
-      for (const f of arrivals)   addMovement(flightMap, f);
-
-      console.log(`[ADB] ${icao}: ${departures.length} dep + ${arrivals.length} arr | map: ${flightMap.size}`);
-
-      if (icao === 'MDSD') {
-        const sample    = departures[0];
-        const sampleArr = arrivals[0];
-        console.log('MDSD sample departure:', JSON.stringify(sample, null, 2));
-        console.log('MDSD sample arrival:',   JSON.stringify(sampleArr, null, 2));
+      // Departures: this airport is the origin (from = thisIata)
+      for (const f of departures) {
+        const toIata = f.arrival?.airport?.iata ?? f.arrival?.airport?.icao ?? null;
+        addToMap(flightMap, f, thisIata, toIata);
       }
+
+      // Arrivals: this airport is the destination (to = thisIata)
+      for (const f of arrivals) {
+        const fromIata = f.departure?.airport?.iata ?? f.departure?.airport?.icao ?? null;
+        addToMap(flightMap, f, fromIata, thisIata);
+      }
+
+      console.log(`[ADB] ${icao} (${thisIata}): ${departures.length} dep + ${arrivals.length} arr | map: ${flightMap.size}`);
     } catch (e) {
       console.log(`[ADB] ${icao} failed:`, e.message);
     }
