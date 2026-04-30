@@ -79,18 +79,20 @@ function bearing(dep, arr) {
 
 
 // ── AeroDataBox ───────────────────────────────────────────────────────────────
-async function fetchAirportDepartures(icao) {
+async function fetchAirportMovements(icao) {
   if (!AERODATABOX_KEY) throw new Error('AERODATABOX_KEY not set');
 
-  const from = new Date(Date.now() - 6 * 60 * 60 * 1000); // 6 h ago
-  const to   = new Date(Date.now() + 0.5 * 60 * 60 * 1000); // +30 min
+  // Departures: up to 6 h ago (long-haul still in the air)
+  // Arrivals:   up to 6 h ahead (flights en route, arriving later today)
+  const from = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const to   = new Date(Date.now() + 6 * 60 * 60 * 1000);
   const fmt  = d => d.toISOString().slice(0, 16);
 
   const url =
     `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}` +
     `/${fmt(from)}/${fmt(to)}` +
     `?withLeg=true&withCancelled=false&withCodeshared=false` +
-    `&withCargo=false&withPrivate=false&withLocation=false&direction=Departure`;
+    `&withCargo=false&withPrivate=false&withLocation=false&direction=Both`;
 
   const res = await fetch(url, {
     headers: {
@@ -104,43 +106,55 @@ async function fetchAirportDepartures(icao) {
   return res.json();
 }
 
+function addMovement(flightMap, f) {
+  const callsign = f.callSign?.trim();
+  if (!callsign) return;
+
+  const status = f.status ?? '';
+  if (['Cancelled', 'Diverted', 'Landed'].includes(status)) return;
+
+  // departure time from origin airport
+  const depMs = toMs(f.departure?.actualTime) ?? toMs(f.departure?.scheduledTime);
+  // arrival time at destination airport
+  const arrMs = toMs(f.arrival?.actualTime) ?? toMs(f.arrival?.scheduledTime);
+
+  const now = Date.now();
+
+  // Must have departed already (or departure time unknown)
+  if (depMs && depMs > now) return;
+  // Must not have already landed (or arrival time unknown)
+  if (arrMs && arrMs < now - 30 * 60 * 1000) return; // allow 30 min grace
+
+  // AeroDataBox sets departure/arrival correctly for both arrays:
+  //   departures[]: departure.airport = this airport, arrival.airport = destination
+  //   arrivals[]:   departure.airport = origin,       arrival.airport = this airport
+  flightMap.set(callsign, {
+    callsign,
+    airline: f.airline?.name                              ?? null,
+    from:    f.departure?.airport?.iata ?? f.departure?.airport?.icao ?? null,
+    to:      f.arrival?.airport?.iata   ?? f.arrival?.airport?.icao   ?? null,
+    depIcao: f.departure?.airport?.icao ?? null,
+    arrIcao: f.arrival?.airport?.icao   ?? null,
+    depMs,
+    arrMs,
+  });
+}
+
 async function fetchAllAeroDataBox() {
-  console.log(`\n[ADB] Fetching ${AIRPORTS.length} airports`);
+  console.log(`\n[ADB] Fetching ${AIRPORTS.length} airports (departures + arrivals)`);
   const flightMap = new Map(); // callsign → flight metadata
 
   for (let i = 0; i < AIRPORTS.length; i++) {
     const icao = AIRPORTS[i];
     try {
-      const data       = await fetchAirportDepartures(icao);
+      const data       = await fetchAirportMovements(icao);
       const departures = data.departures ?? [];
+      const arrivals   = data.arrivals   ?? [];
 
-      for (const f of departures) {
-        const callsign = f.callSign?.trim();
-        if (!callsign) continue;
+      for (const f of departures) addMovement(flightMap, f);
+      for (const f of arrivals)   addMovement(flightMap, f);
 
-        // Skip flights clearly on the ground or cancelled
-        const status = f.status ?? '';
-        if (['Cancelled', 'Diverted', 'Landed'].includes(status)) continue;
-
-        const depMs = toMs(f.departure?.actualTime) ?? toMs(f.departure?.scheduledTime);
-        const arrMs = toMs(f.arrival?.scheduledTime);
-
-        // Skip if departure is still in the future
-        if (depMs && depMs > Date.now()) continue;
-
-        flightMap.set(callsign, {
-          callsign,
-          airline:  f.airline?.name                              ?? null,
-          from:     f.departure?.airport?.iata ?? f.departure?.airport?.icao ?? null,
-          to:       f.arrival?.airport?.iata   ?? f.arrival?.airport?.icao   ?? null,
-          depIcao:  f.departure?.airport?.icao ?? null,
-          arrIcao:  f.arrival?.airport?.icao   ?? null,
-          depMs,
-          arrMs,
-        });
-      }
-
-      console.log(`[ADB] ${icao}: ${departures.length} departures | map: ${flightMap.size}`);
+      console.log(`[ADB] ${icao}: ${departures.length} dep + ${arrivals.length} arr | map: ${flightMap.size}`);
     } catch (e) {
       console.log(`[ADB] ${icao} failed:`, e.message);
     }
