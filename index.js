@@ -155,6 +155,13 @@ async function fetchAllAeroDataBox() {
       for (const f of arrivals)   addMovement(flightMap, f);
 
       console.log(`[ADB] ${icao}: ${departures.length} dep + ${arrivals.length} arr | map: ${flightMap.size}`);
+
+      if (icao === 'MDSD') {
+        const sample    = departures[0];
+        const sampleArr = arrivals[0];
+        console.log('MDSD sample departure:', JSON.stringify(sample, null, 2));
+        console.log('MDSD sample arrival:',   JSON.stringify(sampleArr, null, 2));
+      }
     } catch (e) {
       console.log(`[ADB] ${icao} failed:`, e.message);
     }
