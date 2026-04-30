@@ -77,19 +77,6 @@ function bearing(dep, arr) {
   return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
 }
 
-function estimatePosition(depIcao, arrIcao, depMs, arrMs) {
-  const dep = AIRPORT_COORDS[depIcao];
-  const arr = AIRPORT_COORDS[arrIcao];
-  if (!dep || !arr || !depMs || !arrMs) return null;
-  const now = Date.now();
-  if (now <= depMs || now >= arrMs) return null;
-  const t = (now - depMs) / (arrMs - depMs);
-  return {
-    lat:     dep.lat + (arr.lat - dep.lat) * t,
-    lon:     dep.lon + (arr.lon - dep.lon) * t,
-    heading: Math.round(bearing(dep, arr)),
-  };
-}
 
 // ── AeroDataBox ───────────────────────────────────────────────────────────────
 async function fetchAirportDepartures(icao) {
@@ -203,10 +190,54 @@ async function fetchAllOpenSky() {
   return stateMap;
 }
 
+// ── Position from AeroDataBox data alone ─────────────────────────────────────
+function resolvePosition(flight) {
+  const dep = AIRPORT_COORDS[flight.depIcao];
+  const arr = AIRPORT_COORDS[flight.arrIcao];
+
+  // Best case: interpolate between known airports using timing
+  if (dep && arr && flight.depMs && flight.arrMs) {
+    const now      = Date.now();
+    const duration = flight.arrMs - flight.depMs;
+    const elapsed  = now - flight.depMs;
+
+    // Clamp progress 0..1 — include flights slightly before dep or past arr
+    const t = Math.min(1, Math.max(0, elapsed / duration));
+
+    return {
+      lat:     dep.lat + (arr.lat - dep.lat) * t,
+      lon:     dep.lon + (arr.lon - dep.lon) * t,
+      heading: Math.round(bearing(dep, arr)),
+    };
+  }
+
+  // Have origin + dest but no timing — use midpoint
+  if (dep && arr) {
+    return {
+      lat:     (dep.lat + arr.lat) / 2,
+      lon:     (dep.lon + arr.lon) / 2,
+      heading: Math.round(bearing(dep, arr)),
+    };
+  }
+
+  // Only origin known — place at origin
+  if (dep) {
+    return { lat: dep.lat, lon: dep.lon, heading: 0 };
+  }
+
+  // Only dest known — place at dest
+  if (arr) {
+    return { lat: arr.lat, lon: arr.lon, heading: 0 };
+  }
+
+  // No coords at all — drop this flight (truly unplaceable)
+  return null;
+}
+
 // ── Build flight list from AeroDataBox map ────────────────────────────────────
 function buildFlightsFromAdb(flightMap, stateMap = new Map()) {
   const flights = [];
-  let gpsMatches = 0, estimated = 0;
+  let gpsMatches = 0, estimated = 0, dropped = 0;
 
   for (const [callsign, flight] of flightMap) {
     const state = stateMap.get(callsign);
@@ -222,14 +253,14 @@ function buildFlightsFromAdb(flightMap, stateMap = new Map()) {
       heading  = state[10] ? Math.round(state[10]) : 0;
       gpsMatches++;
     } else {
-      // Estimate position from route progress
-      const est = estimatePosition(flight.depIcao, flight.arrIcao, flight.depMs, flight.arrMs);
-      if (!est) continue;
-      lat      = est.lat;
-      lon      = est.lon;
+      // No OpenSky — estimate from AeroDataBox route data
+      const pos = resolvePosition(flight);
+      if (!pos) { dropped++; continue; }                        // no coords at all — skip
+      lat      = pos.lat;
+      lon      = pos.lon;
       altitude = 35000; // cruise assumption (ft)
       speed    = 480;   // cruise assumption (knots)
-      heading  = est.heading;
+      heading  = pos.heading;
       estimated++;
     }
 
@@ -248,7 +279,9 @@ function buildFlightsFromAdb(flightMap, stateMap = new Map()) {
     });
   }
 
-  console.log(`[Build] ${flights.length} flights — ${gpsMatches} GPS matched, ${estimated} estimated`);
+  console.log(
+    `[Build] ${flights.length} flights — ${gpsMatches} GPS, ${estimated} estimated, ${dropped} dropped (no coords)`
+  );
   return flights;
 }
 
