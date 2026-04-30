@@ -87,6 +87,13 @@ async function fetchAirport(icao) {
     });
   }
 
+  if (icao === 'MDSD') {
+    const sample = data.departures?.[0];
+    if (sample) console.log('MDSD dep sample:', JSON.stringify(sample.arrival?.airport));
+    const sampleArr = data.arrivals?.[0];
+    if (sampleArr) console.log('MDSD arr sample:', JSON.stringify(sampleArr.departure?.airport));
+  }
+
   console.log(`[ADB] ${icao}: ${flights.length} flights`);
   return flights;
 }
