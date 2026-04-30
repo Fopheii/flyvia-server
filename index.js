@@ -2,12 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 const fetch = require('node-fetch');
-const https = require('https');
-
-const httpsAgent = new https.Agent({
-  rejectUnauthorized: false,
-  keepAlive: true,
-});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,103 +9,106 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Fetch entire world split into 4 bbox zones to stay within OpenSky rate limits
-const ZONES = [
-  'lamin=-60&lamax=90&lomin=-180&lomax=-60', // Americas
-  'lamin=-60&lamax=90&lomin=-60&lomax=0',    // Atlantic
-  'lamin=-60&lamax=90&lomin=0&lomax=60',     // Europe/Africa
-  'lamin=-60&lamax=90&lomin=60&lomax=180',   // Asia/Pacific
+const AIRPORTS = [
+  'KJFK', 'KMIA', 'KLAX', 'KATL',
+  'MDSD', 'MDPC', 'TJSJ', 'MMMX',
+  'SKBO', 'SBGR', 'CYYZ', 'MPTO',
 ];
 
-const OPENSKY_BASE = 'https://opensky-network.org/api/states/all';
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 let flightCache = [];
 let lastUpdated = null;
+let nextRefresh = null;
 let fetchErrors = 0;
 
-function mapState(state) {
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function buildTimeWindow() {
+  const now = new Date();
+  const from = now.toISOString().slice(0, 16);
+  const to = new Date(now.getTime() + 4 * 60 * 60 * 1000).toISOString().slice(0, 16);
+  return { from, to };
+}
+
+function mapFlight(flight, type) {
+  const number = flight.number || flight.callsign || '';
   return {
-    id: (state[0] || '').trim(),
-    callsign: (state[0] || '').trim(),
-    country: state[2] || '',
-    lat: state[6],
-    lon: state[5],
-    altitude: state[7],
-    speed: state[9],
-    heading: state[10],
-    on_ground: state[8],
+    id: number,
+    callsign: number,
+    airline: flight.airline?.name || '',
+    status: flight.status || '',
+    type,                                          // 'departure' | 'arrival'
+    origin: flight.departure?.airport?.icao || '',
+    destination: flight.arrival?.airport?.icao || '',
+    scheduledDep: flight.departure?.scheduledTime?.utc || null,
+    scheduledArr: flight.arrival?.scheduledTime?.utc || null,
+    actualDep: flight.departure?.actualTime?.utc || null,
+    actualArr: flight.arrival?.actualTime?.utc || null,
   };
 }
 
-async function fetchZone(query) {
-  const url = `${OPENSKY_BASE}?${query}`;
-  const username = process.env.OPENSKY_USERNAME;
-  const password = process.env.OPENSKY_PASSWORD;
+async function fetchAirport(icao) {
+  const key = process.env.AERODATABOX_KEY;
+  if (!key) throw new Error('AERODATABOX_KEY env var not set');
 
-  const headers = {
-    'Content-Type': 'application/json',
-  };
+  const { from, to } = buildTimeWindow();
+  const url = `https://aerodatabox.p.rapidapi.com/flights/airports/icao/${icao}/${from}/${to}`;
 
-  if (username && password) {
-    const credentials = Buffer.from(`${username}:${password}`).toString('base64');
-    headers['Authorization'] = `Basic ${credentials}`;
-    console.log('Fetching OpenSky zone (authenticated):', url);
-  } else {
-    console.log('Fetching OpenSky zone (anonymous):', url);
-  }
+  console.log(`Fetching ${icao}: ${url}`);
 
   const response = await fetch(url, {
-    headers,
-    agent: httpsAgent,
+    headers: {
+      'x-rapidapi-host': 'aerodatabox.p.rapidapi.com',
+      'x-rapidapi-key': key,
+    },
     timeout: 15000,
   });
 
-  console.log('OpenSky response status:', response.status, 'for zone', query);
+  console.log(`AeroDataBox response for ${icao}: ${response.status}`);
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
+    const body = await response.text().catch(() => '');
+    throw new Error(`HTTP ${response.status} for ${icao}: ${body.slice(0, 200)}`);
   }
 
   const data = await response.json();
-  console.log('OpenSky states count:', data?.states?.length ?? 0, 'for zone', query);
-  return data.states || [];
+
+  const departures = (data.departures || []).map((f) => mapFlight(f, 'departure'));
+  const arrivals = (data.arrivals || []).map((f) => mapFlight(f, 'arrival'));
+
+  console.log(`${icao}: ${departures.length} departures, ${arrivals.length} arrivals`);
+  return [...departures, ...arrivals];
 }
 
 async function fetchAllFlights() {
-  console.log('Cron job triggered at:', new Date().toISOString());
-  try {
-    const results = await Promise.allSettled(ZONES.map(fetchZone));
+  console.log('Fetch triggered at:', new Date().toISOString());
 
-    // Log any zone-level failures
-    results.forEach((r, i) => {
-      if (r.status === 'rejected') {
-        console.error(`Zone ${i} failed:`, r.reason?.message || r.reason);
+  const allFlights = [];
+  const seen = new Set();
+
+  for (const icao of AIRPORTS) {
+    try {
+      const flights = await fetchAirport(icao);
+      for (const f of flights) {
+        if (f.id && !seen.has(f.id + f.type)) {
+          seen.add(f.id + f.type);
+          allFlights.push(f);
+        }
       }
-    });
-
-    const states = results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
-    console.log('Total raw states across all zones:', states.length);
-
-    const flights = states
-      .map(mapState)
-      .filter((f) => f.callsign && !f.on_ground);
-
-    // Deduplicate by callsign (zones have slight overlap)
-    const seen = new Set();
-    const unique = flights.filter((f) => {
-      if (seen.has(f.id)) return false;
-      seen.add(f.id);
-      return true;
-    });
-
-    flightCache = unique;
-    lastUpdated = new Date().toISOString();
-    fetchErrors = 0;
-    console.log(`[${lastUpdated}] Cached ${unique.length} flights`);
-  } catch (err) {
-    fetchErrors++;
-    console.error(`Fetch error (${fetchErrors}):`, err.message);
+    } catch (err) {
+      fetchErrors++;
+      console.error(`Error fetching ${icao}:`, err.message);
+    }
+    await sleep(2000); // 2-second delay between airports
   }
+
+  flightCache = allFlights;
+  lastUpdated = new Date().toISOString();
+  nextRefresh = new Date(Date.now() + CACHE_TTL_MS).toISOString();
+  console.log(`[${lastUpdated}] Cached ${allFlights.length} flights total`);
 }
 
 // GET /health
@@ -120,6 +117,7 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     flights_cached: flightCache.length,
     last_updated: lastUpdated,
+    next_refresh: nextRefresh,
     fetch_errors: fetchErrors,
     uptime_seconds: Math.floor(process.uptime()),
   });
@@ -130,27 +128,28 @@ app.get('/flights', (_req, res) => {
   res.json({
     count: flightCache.length,
     last_updated: lastUpdated,
+    next_refresh: nextRefresh,
     flights: flightCache,
   });
 });
 
-// GET /flights/:country
-app.get('/flights/:country', (req, res) => {
-  const target = req.params.country.toLowerCase();
+// GET /flights/:airport  — filter by origin or destination ICAO
+app.get('/flights/:airport', (req, res) => {
+  const target = req.params.airport.toUpperCase();
   const filtered = flightCache.filter(
-    (f) => f.country.toLowerCase() === target
+    (f) => f.origin === target || f.destination === target
   );
   res.json({
-    country: req.params.country,
+    airport: target,
     count: filtered.length,
     last_updated: lastUpdated,
     flights: filtered,
   });
 });
 
-// Fetch immediately on startup, then every 30 seconds
+// Fetch on startup, then every 5 minutes
 fetchAllFlights();
-cron.schedule('*/30 * * * * *', fetchAllFlights);
+cron.schedule('*/5 * * * *', fetchAllFlights);
 
 app.listen(PORT, () => {
   console.log(`Flyvia server running on port ${PORT}`);
